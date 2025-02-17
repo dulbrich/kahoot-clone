@@ -3,12 +3,14 @@ import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import { Timer, CheckCircle2, XCircle } from 'lucide-react';
 import toast, { Toaster } from 'react-hot-toast';
 import type { Quiz, QuizState, ParticipantAnswer } from '../types';
+import { supabase } from '../lib/supabase';
 
 export default function QuizParticipation() {
   const { code } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
   const [quiz, setQuiz] = useState<Quiz | null>(null);
+  const [participantId, setParticipantId] = useState<string | null>(null);
   const [quizState, setQuizState] = useState<QuizState>({
     currentQuestionIndex: 0,
     timeRemaining: 0,
@@ -17,39 +19,69 @@ export default function QuizParticipation() {
   });
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const [showFeedback, setShowFeedback] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // Simulated quiz data - replace with actual API call
   useEffect(() => {
-    // TODO: Fetch quiz data from API
-    const mockQuiz: Quiz = {
-      id: '1',
-      title: 'Sample Quiz',
-      description: 'A sample quiz for testing',
-      questions: [
-        {
-          id: '1',
-          text: 'What is the capital of France?',
-          timeLimit: 30,
-          options: [
-            { id: 'a', text: 'London', isCorrect: false },
-            { id: 'b', text: 'Paris', isCorrect: true },
-            { id: 'c', text: 'Berlin', isCorrect: false },
-            { id: 'd', text: 'Madrid', isCorrect: false },
-          ],
-        },
-        // Add more questions as needed
-      ],
-      status: 'published',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      shareCode: code,
+    const fetchQuiz = async () => {
+      try {
+        const { data: quizData, error: quizError } = await supabase
+          .from('quizzes')
+          .select(`
+            id,
+            title,
+            description,
+            status,
+            share_code,
+            questions (
+              id,
+              text,
+              time_limit,
+              order,
+              options (
+                id,
+                text,
+                is_correct,
+                order
+              )
+            )
+          `)
+          .eq('share_code', code)
+          .eq('status', 'published')
+          .single();
+
+        if (quizError) throw quizError;
+        if (!quizData) {
+          toast.error('Quiz not found');
+          navigate('/join');
+          return;
+        }
+
+        // Sort questions and options by their order
+        const formattedQuiz = {
+          ...quizData,
+          questions: quizData.questions
+            .sort((a, b) => a.order - b.order)
+            .map(q => ({
+              ...q,
+              options: q.options.sort((a, b) => a.order - b.order),
+            })),
+        };
+
+        setQuiz(formattedQuiz);
+        setQuizState(prev => ({
+          ...prev,
+          timeRemaining: formattedQuiz.questions[0].time_limit,
+        }));
+      } catch (error) {
+        console.error('Error fetching quiz:', error);
+        toast.error('Failed to load quiz');
+      } finally {
+        setIsLoading(false);
+      }
     };
-    setQuiz(mockQuiz);
-    setQuizState(prev => ({
-      ...prev,
-      timeRemaining: mockQuiz.questions[0].timeLimit,
-    }));
-  }, [code]);
+
+    fetchQuiz();
+  }, [code, navigate]);
 
   useEffect(() => {
     if (!location.state?.participantName) {
@@ -76,16 +108,36 @@ export default function QuizParticipation() {
 
   const handleTimeUp = () => {
     if (!selectedOption) {
-      toast.error("Time is up!");
+      toast.error("Time's up!");
     }
     showAnswer();
   };
 
-  const startQuiz = () => {
-    setQuizState(prev => ({
-      ...prev,
-      status: 'active',
-    }));
+  const startQuiz = async () => {
+    if (!quiz) return;
+
+    try {
+      // Create participant record
+      const { data: participant, error: participantError } = await supabase
+        .from('participants')
+        .insert({
+          quiz_id: quiz.id,
+          name: location.state.participantName,
+        })
+        .select()
+        .single();
+
+      if (participantError) throw participantError;
+
+      setParticipantId(participant.id);
+      setQuizState(prev => ({
+        ...prev,
+        status: 'active',
+      }));
+    } catch (error) {
+      console.error('Error starting quiz:', error);
+      toast.error('Failed to start quiz');
+    }
   };
 
   const showAnswer = () => {
@@ -95,6 +147,7 @@ export default function QuizParticipation() {
         nextQuestion();
       } else {
         setQuizState(prev => ({ ...prev, status: 'completed' }));
+        navigate(`/results/${code}`);
       }
     }, 3000);
   };
@@ -103,32 +156,65 @@ export default function QuizParticipation() {
     setQuizState(prev => ({
       ...prev,
       currentQuestionIndex: prev.currentQuestionIndex + 1,
-      timeRemaining: quiz?.questions[prev.currentQuestionIndex + 1].timeLimit || 30,
+      timeRemaining: quiz?.questions[prev.currentQuestionIndex + 1].time_limit || 30,
     }));
     setSelectedOption(null);
     setShowFeedback(false);
   };
 
-  const handleOptionSelect = (optionId: string) => {
-    if (showFeedback || quizState.status !== 'active') return;
+  const handleOptionSelect = async (optionId: string) => {
+    if (showFeedback || quizState.status !== 'active' || !quiz || !participantId) return;
     
     setSelectedOption(optionId);
-    const answer: ParticipantAnswer = {
-      questionId: quiz!.questions[quizState.currentQuestionIndex].id,
-      optionId,
-      timeToAnswer: quiz!.questions[quizState.currentQuestionIndex].timeLimit - quizState.timeRemaining,
-    };
-    setQuizState(prev => ({
-      ...prev,
-      answers: [...prev.answers, answer],
-    }));
-    showAnswer();
+    const currentQuestion = quiz.questions[quizState.currentQuestionIndex];
+    const timeToAnswer = currentQuestion.time_limit - quizState.timeRemaining;
+
+    try {
+      // Save the answer
+      const { error: answerError } = await supabase
+        .from('answers')
+        .insert({
+          participant_id: participantId,
+          question_id: currentQuestion.id,
+          option_id: optionId,
+          time_to_answer: timeToAnswer,
+        });
+
+      if (answerError) throw answerError;
+
+      const answer: ParticipantAnswer = {
+        questionId: currentQuestion.id,
+        optionId,
+        timeToAnswer,
+      };
+
+      setQuizState(prev => ({
+        ...prev,
+        answers: [...prev.answers, answer],
+      }));
+
+      showAnswer();
+    } catch (error) {
+      console.error('Error saving answer:', error);
+      toast.error('Failed to save answer');
+    }
   };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
 
   if (!quiz) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <div className="text-center">
+          <h2 className="text-2xl font-bold text-gray-900">Quiz Not Found</h2>
+          <p className="mt-2 text-gray-600">The quiz you're looking for doesn't exist or has ended.</p>
+        </div>
       </div>
     );
   }
@@ -173,8 +259,8 @@ export default function QuizParticipation() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {currentQuestion.options.map((option) => {
                   const isSelected = selectedOption === option.id;
-                  const showCorrect = showFeedback && option.isCorrect;
-                  const showIncorrect = showFeedback && isSelected && !option.isCorrect;
+                  const showCorrect = showFeedback && option.is_correct;
+                  const showIncorrect = showFeedback && isSelected && !option.is_correct;
 
                   return (
                     <button

@@ -19,85 +19,173 @@ import {
   BarChart2,
   PieChart as PieChartIcon,
 } from 'lucide-react';
+import { useParams } from 'react-router-dom';
+import { supabase } from '../lib/supabase';
 import type { Quiz, ParticipantResult, QuestionSummary } from '../types';
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8'];
 
-interface QuizResultsProps {
-  quiz: Quiz;
-  results: ParticipantResult[];
-}
-
-export default function QuizResults({ quiz, results }: QuizResultsProps) {
+export default function QuizResults() {
+  const { code } = useParams();
+  const [quiz, setQuiz] = useState<Quiz | null>(null);
+  const [results, setResults] = useState<ParticipantResult[]>([]);
   const [activeTab, setActiveTab] = useState<'overview' | 'questions'>('overview');
-  const [selectedQuestion, setSelectedQuestion] = useState<string>(
-    quiz.questions[0]?.id
-  );
+  const [selectedQuestion, setSelectedQuestion] = useState<string>('');
   const [questionSummaries, setQuestionSummaries] = useState<QuestionSummary[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Calculate question summaries
-    const summaries = quiz.questions.map((question) => {
-      const answers = results.flatMap((r) =>
-        r.answers.filter((a) => a.questionId === question.id)
-      );
-      
-      const totalResponses = answers.length;
-      const correctResponses = answers.filter((answer) => {
-        const option = question.options.find((opt) => opt.id === answer.optionId);
-        return option?.isCorrect;
-      }).length;
+    const fetchQuizAndResults = async () => {
+      try {
+        // Fetch quiz data
+        const { data: quizData, error: quizError } = await supabase
+          .from('quizzes')
+          .select(`
+            id,
+            title,
+            description,
+            questions (
+              id,
+              text,
+              time_limit,
+              order,
+              options (
+                id,
+                text,
+                is_correct,
+                order
+              )
+            )
+          `)
+          .eq('share_code', code)
+          .single();
 
-      const averageTime =
-        answers.reduce((sum, answer) => sum + answer.timeToAnswer, 0) /
-        totalResponses;
+        if (quizError) throw quizError;
 
-      const optionBreakdown = question.options.map((option) => {
-        const count = answers.filter((a) => a.optionId === option.id).length;
-        return {
-          optionId: option.id,
-          optionText: option.text,
-          count,
-          percentage: (count / totalResponses) * 100,
+        // Sort questions and options by their order
+        const formattedQuiz = {
+          ...quizData,
+          questions: quizData.questions
+            .sort((a, b) => a.order - b.order)
+            .map(q => ({
+              ...q,
+              options: q.options.sort((a, b) => a.order - b.order),
+            })),
         };
-      });
 
-      return {
-        questionId: question.id,
-        questionText: question.text,
-        totalResponses,
-        correctResponses,
-        averageTime,
-        optionBreakdown,
-      };
-    });
+        setQuiz(formattedQuiz);
+        setSelectedQuestion(formattedQuiz.questions[0]?.id);
 
-    setQuestionSummaries(summaries);
-  }, [quiz, results]);
+        // Fetch participants and their answers
+        const { data: participants, error: participantsError } = await supabase
+          .from('participants')
+          .select(`
+            id,
+            name,
+            answers (
+              question_id,
+              option_id,
+              time_to_answer
+            )
+          `)
+          .eq('quiz_id', quizData.id);
 
-  const overallStats = {
-    totalParticipants: results.length,
-    averageScore:
-      results.reduce((sum, r) => sum + r.score, 0) / results.length,
-    averageTime:
-      results.reduce((sum, r) => sum + r.totalTime, 0) / results.length,
-  };
+        if (participantsError) throw participantsError;
+
+        // Calculate results for each participant
+        const participantResults = participants.map(participant => {
+          const answers = participant.answers || [];
+          let correctAnswers = 0;
+          let totalTime = 0;
+
+          answers.forEach(answer => {
+            const question = formattedQuiz.questions.find(q => q.id === answer.question_id);
+            if (question) {
+              const selectedOption = question.options.find(opt => opt.id === answer.option_id);
+              if (selectedOption?.is_correct) {
+                correctAnswers++;
+              }
+              totalTime += answer.time_to_answer;
+            }
+          });
+
+          const score = (correctAnswers / formattedQuiz.questions.length) * 100;
+
+          return {
+            participantId: participant.id,
+            participantName: participant.name,
+            answers,
+            score,
+            totalTime,
+          };
+        });
+
+        setResults(participantResults);
+
+        // Calculate question summaries
+        const summaries = formattedQuiz.questions.map(question => {
+          const answers = participants.flatMap(p => 
+            p.answers.filter(a => a.question_id === question.id)
+          );
+          
+          const totalResponses = answers.length;
+          const correctResponses = answers.filter(answer => {
+            const option = question.options.find(opt => opt.id === answer.option_id);
+            return option?.is_correct;
+          }).length;
+
+          const averageTime =
+            answers.reduce((sum, answer) => sum + answer.time_to_answer, 0) /
+            totalResponses || 0;
+
+          const optionBreakdown = question.options.map(option => {
+            const count = answers.filter(a => a.option_id === option.id).length;
+            return {
+              optionId: option.id,
+              optionText: option.text,
+              count,
+              percentage: (count / totalResponses) * 100 || 0,
+            };
+          });
+
+          return {
+            questionId: question.id,
+            questionText: question.text,
+            totalResponses,
+            correctResponses,
+            averageTime,
+            optionBreakdown,
+          };
+        });
+
+        setQuestionSummaries(summaries);
+      } catch (error) {
+        console.error('Error fetching quiz results:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchQuizAndResults();
+  }, [code]);
 
   const exportResults = () => {
+    if (!quiz) return;
+
     const csvContent = [
       // Header
       ['Participant', 'Score', 'Total Time', ...quiz.questions.map((q) => q.text)],
       // Data rows
       ...results.map((result) => [
         result.participantName,
-        result.score,
+        result.score.toFixed(1),
         result.totalTime,
         ...quiz.questions.map((question) => {
           const answer = result.answers.find(
-            (a) => a.questionId === question.id
+            (a) => a.question_id === question.id
           );
           const option = question.options.find(
-            (opt) => opt.id === answer?.optionId
+            (opt) => opt.id === answer?.option_id
           );
           return option?.text || 'No answer';
         }),
@@ -115,6 +203,33 @@ export default function QuizResults({ quiz, results }: QuizResultsProps) {
     a.click();
     document.body.removeChild(a);
     window.URL.revokeObjectURL(url);
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  if (!quiz || !results.length) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <h2 className="text-2xl font-bold text-gray-900">No Results Available</h2>
+          <p className="mt-2 text-gray-600">There are no results to display yet.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const overallStats = {
+    totalParticipants: results.length,
+    averageScore:
+      results.reduce((sum, r) => sum + r.score, 0) / results.length,
+    averageTime:
+      results.reduce((sum, r) => sum + r.totalTime, 0) / results.length,
   };
 
   const selectedQuestionSummary = questionSummaries.find(

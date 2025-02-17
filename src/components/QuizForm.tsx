@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { PlusCircle, Trash2, Clock, Save, Share2 } from 'lucide-react';
-import { Toaster } from 'react-hot-toast';
+import { Toaster, toast } from 'react-hot-toast';
 import type { Quiz, QuizQuestion } from '../types';
 import ShareModal from './ShareModal';
+import { supabase } from '../lib/supabase';
 
 const initialQuiz: Quiz = {
   id: crypto.randomUUID(),
@@ -35,6 +36,7 @@ function generateShareCode() {
 export default function QuizForm() {
   const [quiz, setQuiz] = useState<Quiz>(initialQuiz);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
   const addQuestion = () => {
     setQuiz(prev => ({
@@ -85,18 +87,120 @@ export default function QuizForm() {
     }));
   };
 
-  const saveQuiz = (status: 'draft' | 'published') => {
-    const updatedQuiz = {
-      ...quiz,
-      status,
-      updatedAt: new Date(),
-      shareCode: status === 'published' ? generateShareCode() : undefined,
-    };
-    setQuiz(updatedQuiz);
-    console.log('Saving quiz:', updatedQuiz);
-    
-    if (status === 'published') {
-      setShowShareModal(true);
+  const validateQuiz = () => {
+    if (!quiz.title.trim()) {
+      toast.error('Please enter a quiz title');
+      return false;
+    }
+
+    if (quiz.questions.length === 0) {
+      toast.error('Please add at least one question');
+      return false;
+    }
+
+    for (const [index, question] of quiz.questions.entries()) {
+      if (!question.text.trim()) {
+        toast.error(`Question ${index + 1} is empty`);
+        return false;
+      }
+
+      if (question.options.length < 2) {
+        toast.error(`Question ${index + 1} needs at least 2 options`);
+        return false;
+      }
+
+      const hasCorrectOption = question.options.some(opt => opt.isCorrect);
+      if (!hasCorrectOption) {
+        toast.error(`Question ${index + 1} needs at least one correct answer`);
+        return false;
+      }
+
+      for (const [optIndex, option] of question.options.entries()) {
+        if (!option.text.trim()) {
+          toast.error(`Option ${optIndex + 1} in Question ${index + 1} is empty`);
+          return false;
+        }
+      }
+    }
+
+    return true;
+  };
+
+  const saveQuiz = async (status: 'draft' | 'published') => {
+    if (!validateQuiz()) return;
+
+    setIsLoading(true);
+    const shareCode = status === 'published' ? generateShareCode() : null;
+
+    try {
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+
+      if (authError || !user) {
+        toast.error('Please sign in to save your quiz');
+        return;
+      }
+
+      // Start a transaction by inserting the quiz first
+      const { data: quizData, error: quizError } = await supabase
+        .from('quizzes')
+        .insert({
+          title: quiz.title,
+          description: quiz.description,
+          status,
+          share_code: shareCode,
+          user_id: user.id,
+        })
+        .select()
+        .single();
+
+      if (quizError) throw quizError;
+
+      // Insert questions with their order
+      const questionsPromises = quiz.questions.map((question, index) =>
+        supabase
+          .from('questions')
+          .insert({
+            quiz_id: quizData.id,
+            text: question.text,
+            time_limit: question.timeLimit,
+            order: index,
+          })
+          .select()
+          .single()
+      );
+
+      const questionsResults = await Promise.all(questionsPromises);
+      const questionErrors = questionsResults.filter(result => result.error);
+      if (questionErrors.length > 0) throw questionErrors[0].error;
+
+      // Insert options for each question with their order
+      const optionsPromises = questionsResults.flatMap((result, questionIndex) =>
+        quiz.questions[questionIndex].options.map((option, optionIndex) =>
+          supabase.from('options').insert({
+            question_id: result.data!.id,
+            text: option.text,
+            is_correct: option.isCorrect,
+            order: optionIndex,
+          })
+        )
+      );
+
+      await Promise.all(optionsPromises);
+
+      toast.success(status === 'published' ? 'Quiz published!' : 'Draft saved!');
+      
+      if (status === 'published') {
+        setQuiz(prev => ({ ...prev, shareCode }));
+        setShowShareModal(true);
+      }
+    } catch (error) {
+      console.error('Error saving quiz:', error);
+      toast.error('Failed to save quiz. Please try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -227,14 +331,16 @@ export default function QuizForm() {
         <div className="flex flex-col sm:flex-row justify-end space-y-3 sm:space-y-0 sm:space-x-4">
           <button
             onClick={() => saveQuiz('draft')}
-            className="w-full sm:w-auto px-6 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 flex items-center justify-center space-x-2 touch-manipulation"
+            disabled={isLoading}
+            className="w-full sm:w-auto px-6 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 flex items-center justify-center space-x-2 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Save className="w-4 h-4" />
             <span>Save Draft</span>
           </button>
           <button
             onClick={() => saveQuiz('published')}
-            className="w-full sm:w-auto px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 flex items-center justify-center space-x-2 touch-manipulation"
+            disabled={isLoading}
+            className="w-full sm:w-auto px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 flex items-center justify-center space-x-2 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Share2 className="w-4 h-4" />
             <span>Publish & Share</span>
