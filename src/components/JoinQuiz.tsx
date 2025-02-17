@@ -23,20 +23,48 @@ export default function JoinQuiz() {
     }
 
     try {
+      // Get current user
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      
+      if (userError || !user) {
+        toast.error('You must be signed in to participate');
+        return;
+      }
+
       // Verify the quiz exists and is published
       const { data: quiz, error: quizError } = await supabase
         .from('quizzes')
         .select('id, status')
-        .eq('share_code', code)
+        .ilike('share_code', code) // Case-insensitive comparison
         .eq('status', 'published')
         .single();
 
       if (quizError || !quiz) {
+        console.error('Quiz verification error:', quizError);
         toast.error('Invalid quiz code');
         return;
       }
 
-      navigate(`/quiz/${code}`);
+      // Check if user is already a participant
+      const { data: existingParticipant, error: participantError } = await supabase
+        .from('participants')
+        .select('id')
+        .eq('quiz_id', quiz.id)
+        .eq('name', user.email)
+        .single();
+
+      if (participantError && participantError.code !== 'PGRST116') { // PGRST116 is "not found" error
+        console.error('Participant check error:', participantError);
+        toast.error('Failed to verify participation status');
+        return;
+      }
+
+      if (existingParticipant) {
+        toast.error('You have already participated in this quiz');
+        return;
+      }
+
+      navigate(`/quiz/${code.toUpperCase()}`);
     } catch (error) {
       console.error('Error verifying quiz:', error);
       toast.error('Failed to join quiz');
