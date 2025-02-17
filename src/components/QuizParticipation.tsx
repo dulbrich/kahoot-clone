@@ -76,6 +76,7 @@ export default function QuizParticipation() {
       } catch (error) {
         console.error('Error fetching quiz:', error);
         toast.error('Failed to load quiz');
+        navigate('/join');
       } finally {
         setIsLoading(false);
       }
@@ -115,7 +116,10 @@ export default function QuizParticipation() {
   };
 
   const startQuiz = async () => {
-    if (!quiz || !location.state?.participantName) return;
+    if (!quiz || !location.state?.participantName) {
+      toast.error('Missing required information to start quiz');
+      return;
+    }
 
     setStartLoading(true);
     try {
@@ -126,7 +130,7 @@ export default function QuizParticipation() {
           quiz_id: quiz.id,
           name: location.state.participantName,
         })
-        .select()
+        .select('id')
         .single();
 
       if (participantError) {
@@ -134,8 +138,8 @@ export default function QuizParticipation() {
         throw new Error('Failed to register participant');
       }
 
-      if (!participant) {
-        throw new Error('No participant data returned');
+      if (!participant?.id) {
+        throw new Error('No participant ID returned');
       }
 
       setParticipantId(participant.id);
@@ -143,6 +147,8 @@ export default function QuizParticipation() {
         ...prev,
         status: 'active',
       }));
+      
+      toast.success('Quiz started!');
     } catch (error) {
       console.error('Error starting quiz:', error);
       toast.error('Failed to start quiz. Please try again.');
@@ -191,7 +197,10 @@ export default function QuizParticipation() {
           time_to_answer: timeToAnswer,
         });
 
-      if (answerError) throw answerError;
+      if (answerError) {
+        console.error('Error saving answer:', answerError);
+        throw answerError;
+      }
 
       const answer: ParticipantAnswer = {
         questionId: currentQuestion.id,
