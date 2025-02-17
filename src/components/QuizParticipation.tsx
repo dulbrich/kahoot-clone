@@ -20,6 +20,7 @@ export default function QuizParticipation() {
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const [showFeedback, setShowFeedback] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [startLoading, setStartLoading] = useState(false);
 
   useEffect(() => {
     const fetchQuiz = async () => {
@@ -114,8 +115,9 @@ export default function QuizParticipation() {
   };
 
   const startQuiz = async () => {
-    if (!quiz) return;
+    if (!quiz || !location.state?.participantName) return;
 
+    setStartLoading(true);
     try {
       // Create participant record
       const { data: participant, error: participantError } = await supabase
@@ -127,7 +129,14 @@ export default function QuizParticipation() {
         .select()
         .single();
 
-      if (participantError) throw participantError;
+      if (participantError) {
+        console.error('Error creating participant:', participantError);
+        throw new Error('Failed to register participant');
+      }
+
+      if (!participant) {
+        throw new Error('No participant data returned');
+      }
 
       setParticipantId(participant.id);
       setQuizState(prev => ({
@@ -136,7 +145,9 @@ export default function QuizParticipation() {
       }));
     } catch (error) {
       console.error('Error starting quiz:', error);
-      toast.error('Failed to start quiz');
+      toast.error('Failed to start quiz. Please try again.');
+    } finally {
+      setStartLoading(false);
     }
   };
 
@@ -232,9 +243,17 @@ export default function QuizParticipation() {
             </p>
             <button
               onClick={startQuiz}
-              className="px-8 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              disabled={startLoading}
+              className="px-8 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Start Quiz
+              {startLoading ? (
+                <div className="flex items-center space-x-2">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                  <span>Starting...</span>
+                </div>
+              ) : (
+                'Start Quiz'
+              )}
             </button>
           </div>
         )}

@@ -1,19 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { PlusCircle, Trash2, Clock, Save, Share2 } from 'lucide-react';
 import { Toaster, toast } from 'react-hot-toast';
+import { useParams, useNavigate } from 'react-router-dom';
 import type { Quiz, QuizQuestion } from '../types';
 import ShareModal from './ShareModal';
 import { supabase } from '../lib/supabase';
-
-const initialQuiz: Quiz = {
-  id: crypto.randomUUID(),
-  title: '',
-  description: '',
-  questions: [],
-  status: 'draft',
-  createdAt: new Date(),
-  updatedAt: new Date(),
-};
 
 const initialQuestion: Omit<QuizQuestion, 'id'> = {
   text: '',
@@ -34,9 +25,89 @@ function generateShareCode() {
 }
 
 export default function QuizForm() {
-  const [quiz, setQuiz] = useState<Quiz>(initialQuiz);
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [quiz, setQuiz] = useState<Quiz>({
+    id: id || crypto.randomUUID(),
+    title: '',
+    description: '',
+    questions: [],
+    status: 'draft',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
   const [showShareModal, setShowShareModal] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(!!id);
+
+  useEffect(() => {
+    if (id) {
+      fetchQuiz();
+    }
+  }, [id]);
+
+  const fetchQuiz = async () => {
+    try {
+      const { data: quizData, error: quizError } = await supabase
+        .from('quizzes')
+        .select(`
+          id,
+          title,
+          description,
+          status,
+          share_code,
+          questions (
+            id,
+            text,
+            time_limit,
+            order,
+            options (
+              id,
+              text,
+              is_correct,
+              order
+            )
+          )
+        `)
+        .eq('id', id)
+        .single();
+
+      if (quizError) throw quizError;
+
+      // Transform the data to match our frontend model
+      const formattedQuiz: Quiz = {
+        id: quizData.id,
+        title: quizData.title,
+        description: quizData.description || '',
+        status: quizData.status,
+        shareCode: quizData.share_code,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        questions: quizData.questions
+          .sort((a: any, b: any) => a.order - b.order)
+          .map((q: any) => ({
+            id: q.id,
+            text: q.text,
+            timeLimit: q.time_limit,
+            options: q.options
+              .sort((a: any, b: any) => a.order - b.order)
+              .map((opt: any) => ({
+                id: opt.id,
+                text: opt.text,
+                isCorrect: opt.is_correct,
+              })),
+          })),
+      };
+
+      setQuiz(formattedQuiz);
+    } catch (error) {
+      console.error('Error fetching quiz:', error);
+      toast.error('Failed to load quiz');
+      navigate('/');
+    } finally {
+      setInitialLoading(false);
+    }
+  };
 
   const addQuestion = () => {
     setQuiz(prev => ({
@@ -130,7 +201,7 @@ export default function QuizForm() {
     if (!validateQuiz()) return;
 
     setIsLoading(true);
-    const shareCode = status === 'published' ? generateShareCode() : null;
+    const shareCode = status === 'published' ? quiz.shareCode || generateShareCode() : null;
 
     try {
       const {
@@ -143,10 +214,11 @@ export default function QuizForm() {
         return;
       }
 
-      // Start a transaction by inserting the quiz first
+      // Update or create the quiz
       const { data: quizData, error: quizError } = await supabase
         .from('quizzes')
-        .insert({
+        .upsert({
+          id: quiz.id,
           title: quiz.title,
           description: quiz.description,
           status,
@@ -157,6 +229,16 @@ export default function QuizForm() {
         .single();
 
       if (quizError) throw quizError;
+
+      // Delete existing questions and options if editing
+      if (id) {
+        const { error: deleteError } = await supabase
+          .from('questions')
+          .delete()
+          .eq('quiz_id', quiz.id);
+
+        if (deleteError) throw deleteError;
+      }
 
       // Insert questions with their order
       const questionsPromises = quiz.questions.map((question, index) =>
@@ -195,6 +277,8 @@ export default function QuizForm() {
       if (status === 'published') {
         setQuiz(prev => ({ ...prev, shareCode }));
         setShowShareModal(true);
+      } else {
+        navigate('/');
       }
     } catch (error) {
       console.error('Error saving quiz:', error);
@@ -203,6 +287,14 @@ export default function QuizForm() {
       setIsLoading(false);
     }
   };
+
+  if (initialLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
 
   return (
     <>
