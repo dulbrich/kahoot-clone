@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, useLocation, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { Timer, CheckCircle2, XCircle } from 'lucide-react';
 import toast, { Toaster } from 'react-hot-toast';
 import type { Quiz, QuizState, ParticipantAnswer } from '../types';
@@ -7,7 +7,6 @@ import { supabase } from '../lib/supabase';
 
 export default function QuizParticipation() {
   const { code } = useParams();
-  const location = useLocation();
   const navigate = useNavigate();
   const [quiz, setQuiz] = useState<Quiz | null>(null);
   const [participantId, setParticipantId] = useState<string | null>(null);
@@ -86,12 +85,6 @@ export default function QuizParticipation() {
   }, [code, navigate]);
 
   useEffect(() => {
-    if (!location.state?.participantName) {
-      navigate(`/join/${code}`);
-    }
-  }, [location.state, code, navigate]);
-
-  useEffect(() => {
     if (quizState.status === 'active' && quizState.timeRemaining > 0) {
       const timer = setInterval(() => {
         setQuizState(prev => ({
@@ -116,19 +109,26 @@ export default function QuizParticipation() {
   };
 
   const startQuiz = async () => {
-    if (!quiz || !location.state?.participantName) {
-      toast.error('Missing required information to start quiz');
+    if (!quiz) {
+      toast.error('Quiz not found');
       return;
     }
 
     setStartLoading(true);
     try {
+      // Get current user
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      
+      if (userError || !user) {
+        throw new Error('You must be signed in to participate');
+      }
+
       // Create participant record
       const { data: participant, error: participantError } = await supabase
         .from('participants')
         .insert({
           quiz_id: quiz.id,
-          name: location.state.participantName,
+          name: user.email, // Use user's email as the participant name
         })
         .select('id')
         .single();
@@ -151,7 +151,7 @@ export default function QuizParticipation() {
       toast.success('Quiz started!');
     } catch (error) {
       console.error('Error starting quiz:', error);
-      toast.error('Failed to start quiz. Please try again.');
+      toast.error(error instanceof Error ? error.message : 'Failed to start quiz. Please try again.');
     } finally {
       setStartLoading(false);
     }
@@ -247,9 +247,7 @@ export default function QuizParticipation() {
         {quizState.status === 'waiting' && (
           <div className="text-center space-y-6 mt-20">
             <h2 className="text-3xl font-bold text-gray-900">Ready to Start?</h2>
-            <p className="text-gray-600">
-              Welcome, {location.state?.participantName}! Click the button below when you're ready.
-            </p>
+            <p className="text-gray-600">Click the button below when you're ready to begin.</p>
             <button
               onClick={startQuiz}
               disabled={startLoading}
