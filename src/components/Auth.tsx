@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { LogIn, Loader } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import toast from 'react-hot-toast';
+import type { AuthError } from '@supabase/supabase-js';
 
 export default function Auth() {
   const [email, setEmail] = useState('');
@@ -14,29 +15,62 @@ export default function Auth() {
     setLoading(true);
 
     try {
-      const { error } = isSignUp
-        ? await supabase.auth.signUp({
-            email,
-            password,
-          })
-        : await supabase.auth.signInWithPassword({
-            email,
-            password,
-          });
-
-      if (error) throw error;
-
       if (isSignUp) {
+        const { error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            emailRedirectTo: `${window.location.origin}`,
+          },
+        });
+
+        if (error) throw error;
+
         toast.success('Account created! You can now sign in.');
         setIsSignUp(false);
       } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+
+        if (error) throw error;
+
         toast.success('Signed in successfully!');
       }
     } catch (error) {
-      toast.error(error.message);
+      const authError = error as AuthError;
+      console.error('Auth error:', authError);
+
+      let errorMessage = 'An error occurred during authentication';
+      
+      if (authError.message) {
+        switch (authError.message) {
+          case 'Invalid login credentials':
+            errorMessage = 'Invalid email or password. Please try again.';
+            break;
+          case 'User already registered':
+            errorMessage = 'This email is already registered. Please sign in instead.';
+            break;
+          case 'Password should be at least 6 characters':
+            errorMessage = 'Password must be at least 6 characters long.';
+            break;
+          default:
+            errorMessage = authError.message;
+        }
+      }
+
+      toast.error(errorMessage);
+      setPassword('');
     } finally {
       setLoading(false);
     }
+  };
+
+  const switchMode = () => {
+    setIsSignUp(!isSignUp);
+    setEmail('');
+    setPassword('');
   };
 
   return (
@@ -67,9 +101,10 @@ export default function Auth() {
                 type="email"
                 required
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => setEmail(e.target.value.trim())}
                 className="mt-1 block w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 placeholder="Enter your email"
+                autoComplete={isSignUp ? 'email' : 'username'}
               />
             </div>
 
@@ -84,8 +119,9 @@ export default function Auth() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="mt-1 block w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Enter your password"
+                placeholder={isSignUp ? 'Create a password (min. 6 characters)' : 'Enter your password'}
                 minLength={6}
+                autoComplete={isSignUp ? 'new-password' : 'current-password'}
               />
             </div>
           </div>
@@ -105,7 +141,7 @@ export default function Auth() {
           <div className="text-center">
             <button
               type="button"
-              onClick={() => setIsSignUp(!isSignUp)}
+              onClick={switchMode}
               className="text-sm text-blue-600 hover:text-blue-500"
             >
               {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
